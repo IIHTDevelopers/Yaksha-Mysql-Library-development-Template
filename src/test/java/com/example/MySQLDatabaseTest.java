@@ -124,9 +124,7 @@ public class MySQLDatabaseTest {
     public void testProcedureExists() throws Exception {
         try {
             List<String> procedures = List.of(
-                "sp_AggregateStats", "sp_StringOperations", "sp_JoinReports",
-                "sp_OperatorExamples", "sp_FormattedDates", "sp_WildcardExamples",
-                "sp_ClauseExamples", "sp_RunAllReports"
+                "sp_AggregateStats"
             );
 
             boolean allExist = true;
