@@ -3,6 +3,8 @@ package com.example;
 import org.junit.jupiter.api.*;
 import java.sql.*;
 
+import java.util.*;
+
 import static com.example.utils.TestUtils.businessTestFile;
 import static com.example.utils.TestUtils.currentTest;
 import static com.example.utils.TestUtils.testReport;
@@ -13,142 +15,163 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class MySQLDatabaseTest {
 
-    private static final String URL = "jdbc:mysql://localhost:3306/empdb?serverTimezone=UTC";
-    private static final String USER = "root";
-    private static final String PASSWORD = "pass@word1";
-
-    private static Connection connection;
+   static Connection conn;
 
     @BeforeAll
-    public static void setup() throws SQLException {
-        connection = DriverManager.getConnection(URL, USER, PASSWORD);
+    public static void init() throws Exception {
+        try {
+            conn = DriverManager.getConnection(
+                "jdbc:mysql://localhost:3306/LibraryDB?serverTimezone=UTC",
+                "root",
+                "pass@word1"
+            );
+            yakshaAssert("testDBConnection", conn != null, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert("testDBConnection", false, businessTestFile);
+        }
+    }
+
+    // ---------- Helpers ----------
+    private boolean schemaExists(String schema) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?")) {
+            ps.setString(1, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private boolean tableExists(String table) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        try (ResultSet rs = meta.getTables(null, null, table, null)) {
+            return rs.next();
+        }
+    }
+
+    private boolean rowExists(String sql, Object... params) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) ps.setObject(i + 1, params[i]);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private boolean callProcedure(String callSyntax) {
+        try (CallableStatement cs = conn.prepareCall(callSyntax)) {
+            boolean hasResults = cs.execute();
+            // Consider success if it yields a result set or an update count, or just executes without error
+            if (hasResults) return true;
+            int updateCount = cs.getUpdateCount();
+            if (updateCount != -1) return true;
+            // Consume extras in case proc returns multiple
+            while (cs.getMoreResults() || cs.getUpdateCount() != -1) { /* no-op */ }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ---------- Tests ----------
+
+    @Test
+    public void testDatabaseExists() throws Exception {
+        try {
+            boolean exists = schemaExists("LibraryDB");
+            yakshaAssert(currentTest(), exists, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert(currentTest(), false, businessTestFile);
+        }
+    }
+
+    @Test
+    public void testTableExists() throws Exception {
+        try {
+            List<String> expectedTables = Arrays.asList("Members", "Books", "BorrowTransactions");
+            boolean allExist = true;
+            for (String t : expectedTables) {
+                if (!tableExists(t)) { allExist = false; break; }
+            }
+            yakshaAssert(currentTest(), allExist, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert(currentTest(), false, businessTestFile);
+        }
+    }
+
+    @Test
+    public void testSeedDataExists() throws Exception {
+        try {
+            boolean ok =
+                // Members
+                rowExists("SELECT 1 FROM Members WHERE FullName = ? AND Email = ? AND JoinDate = ?", "Alice Johnson", "alice@example.com", java.sql.Date.valueOf("2023-01-10")) &&
+                rowExists("SELECT 1 FROM Members WHERE FullName = ? AND Email = ? AND JoinDate = ?", "Bob Smith", "bob@example.com", java.sql.Date.valueOf("2023-02-15")) &&
+                // Books
+                rowExists("SELECT 1 FROM Books WHERE Title = ? AND Author = ? AND Genre = ? AND PublishedYear = ?", "The Great Gatsby", "F. Scott Fitzgerald", "Fiction", 1925) &&
+                rowExists("SELECT 1 FROM Books WHERE Title = ? AND Author = ? AND Genre = ? AND PublishedYear = ?", "Clean Code", "Robert C. Martin", "Programming", 2008) &&
+                // BorrowTransactions
+                rowExists("SELECT 1 FROM BorrowTransactions WHERE MemberID = ? AND BookID = ? AND BorrowDate = ? AND ReturnDate = ?", 1, 1, java.sql.Date.valueOf("2023-03-01"), java.sql.Date.valueOf("2023-03-15")) &&
+                rowExists("SELECT 1 FROM BorrowTransactions WHERE MemberID = ? AND BookID = ? AND BorrowDate = ? AND ReturnDate IS NULL", 2, 2, java.sql.Date.valueOf("2023-03-05"));
+            yakshaAssert(currentTest(), ok, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert(currentTest(), false, businessTestFile);
+        }
+    }
+
+    @Test
+    public void testProcedureExists() throws Exception {
+        try {
+            List<String> procedures = List.of(
+                "sp_AggregateStats", "sp_StringOperations", "sp_JoinReports",
+                "sp_OperatorExamples", "sp_FormattedDates", "sp_WildcardExamples",
+                "sp_ClauseExamples", "sp_RunAllReports"
+            );
+
+            boolean allExist = true;
+            for (String proc : procedures) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES " +
+                    "WHERE ROUTINE_SCHEMA = 'LibraryDB' AND ROUTINE_NAME = ?")) {
+                    ps.setString(1, proc);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) { allExist = false; break; }
+                    }
+                }
+            }
+            yakshaAssert(currentTest(), allExist, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert(currentTest(), false, businessTestFile);
+        }
+    }
+
+    // ---------- Procedure body/content checks (kept exactly like your style) ----------
+
+    private String getProcedureBody(String procName) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT ROUTINE_DEFINITION FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = 'LibraryDB' AND ROUTINE_NAME = ?")) {
+            ps.setString(1, procName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getString("ROUTINE_DEFINITION").toUpperCase();
+            }
+        }
+        return "";
+    }
+    
+    @Test
+    public void test_sp_AggregateStats_Content() throws Exception {
+        try {
+            String body = getProcedureBody("sp_AggregateStats");
+            boolean status = body.contains("COUNT") && body.contains("MAX") && body.contains("MIN");
+            yakshaAssert(currentTest(), status, businessTestFile);
+        } catch (Exception ex) {
+            yakshaAssert(currentTest(), false, businessTestFile);
+        }
     }
 
     @AfterAll
-    public static void teardown() throws SQLException {
-        if (connection != null && !connection.isClosed()) {
-            connection.close();
-        }
-    }
-
-    @Test
-    @Order(1)
-    public void testDatabaseExists() throws Exception {
-        String query = "SHOW DATABASES LIKE 'empdb'";
-        try (PreparedStatement stmt = connection.prepareStatement(query);
-             ResultSet rs = stmt.executeQuery()) {
-                yakshaAssert(currentTest(), rs.next(), businessTestFile);
-           // assertTrue(rs.next(), "Database 'empdb' does not exist");
-        }catch(Exception ex){
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
-    }
-
-    @Test
-    @Order(2)
-    public void testTableExists() throws Exception {
-        String query = "SHOW TABLES IN empdb LIKE 'empmaster'";
-        try (PreparedStatement stmt = connection.prepareStatement(query);
-             ResultSet rs = stmt.executeQuery()) {
-            yakshaAssert(currentTest(), rs.next(), businessTestFile);
-           // assertTrue(rs.next(), "Database 'empdb' does not exist");
-        }catch(Exception ex){
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
-    }
-
-    @Test
-    @Order(3)
-    public void testTableSchema() throws Exception {
-        String query = "DESCRIBE empdb.empmaster";
-        try (PreparedStatement stmt = connection.prepareStatement(query);
-             ResultSet rs = stmt.executeQuery()) {
-            String[][] expectedSchema = {
-                {"ID", "int"},
-                {"empname", "text"},
-                {"empemail", "text"},
-                {"dept", "text"},
-                {"age", "int"}
-            };
-            int i = 0;
-            while (rs.next()) {
-              
-                 yakshaAssert(currentTest(), (expectedSchema[i][0].equals(rs.getString("Field")) && rs.getString("Type").startsWith(expectedSchema[i][1])), businessTestFile);
-               // assertEquals(expectedSchema[i][0], rs.getString("Field"));
-                //assertTrue(rs.getString("Type").startsWith(expectedSchema[i][1]),"Mismatch in field type for " + expectedSchema[i][0]);
-                i++;
-            }
-            //assertEquals(expectedSchema.length, i, "Schema field count does not match");
-        }catch(Exception ex){
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
-    }
-
-
-    
-
-    @Test
-    @Order(4)
-    public void testRecordExists() throws Exception {
-        String query = "SELECT * FROM empdb.empmaster WHERE ID = ? AND empname = ? AND empemail = ? AND dept = ? AND age = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(query)) {
-            stmt.setInt(1, 1);
-            stmt.setString(2, "David");
-            stmt.setString(3, "david@gmail.com");
-            stmt.setString(4, "Finance");
-            stmt.setInt(5, 40);
-
-            try (ResultSet rs = stmt.executeQuery()) {
-                yakshaAssert(currentTest(), rs.next(), businessTestFile);
-                //assertTrue(rs.next(), "Record with given values does not exist in 'empmaster'");
-            }
-        }catch(Exception ex){
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
-    }
-
-    
-    @Test
-     @Order(5)
-    public void testProcedureExists() throws Exception {
-        String checkProcedure = "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE='PROCEDURE' AND ROUTINE_SCHEMA='empdb' AND ROUTINE_NAME='GetEmployeesWithBonusAboveAge'";
-        try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery(checkProcedure)) {
-
-            yakshaAssert(currentTest(), rs.next(), businessTestFile);
-        }catch(Exception ex){
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
-    }
-
-    @Test
-     @Order(6)
-    public void testProcedureOutput() throws Exception {
-        try{
-        CallableStatement stmt = connection.prepareCall("{CALL GetEmployeesWithBonusAboveAge(?)}");
-        stmt.setInt(1, 30);
-
-        ResultSet rs = stmt.executeQuery();
-
-        boolean atLeastOne = false;
-        while (rs.next()) {
-            
-            int age = rs.getInt("age");
-            int expectedBonus = age * 2500;
-            int actualBonus = rs.getInt("bonus");
-
-            if(age > 30 && expectedBonus == actualBonus){
-                atLeastOne = true;
-                break;
-            }
-        }
-         System.out.println(atLeastOne);
-        yakshaAssert(currentTest(), atLeastOne, businessTestFile);
-        rs.close();
-        stmt.close();
-        }catch(Exception ex){
-            System.out.println("EX :" + ex);
-            yakshaAssert(currentTest(), false, businessTestFile);
-        }
+    public static void tearDown() throws Exception {
+        try {
+            if (conn != null && !conn.isClosed()) conn.close();
+        } catch (Exception ignored) { }
     }
 }
